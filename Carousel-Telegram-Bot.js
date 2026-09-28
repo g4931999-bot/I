@@ -1,220 +1,242 @@
 
-// TubePilot - FULL PRODUCTION BOT
-// 1. Telegram: image -> Carousel, video -> Reels
-// 2. Meta Webhook: Verification for App Review
-// 3. Instagram Business Login: OAuth Callback for Production
-
 const { Telegraf } = require('telegraf');
-const axios = require('axios');
 const express = require('express');
+const axios = require('axios');
 const { getDb } = require('./firebase');
+const fs = require('fs');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const IG_USER_ID = process.env.IG_USER_ID;
 const IG_ACCESS_TOKEN = process.env.IG_ACCESS_TOKEN;
-const APP_ID = process.env.APP_ID || '2266294787495207';
-const APP_SECRET = process.env.APP_SECRET;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'tubepilot123';
 
 if(!BOT_TOKEN) throw new Error('BOT_TOKEN missing');
+if(!IG_USER_ID) throw new Error('IG_USER_ID missing');
+if(!IG_ACCESS_TOKEN) throw new Error('IG_ACCESS_TOKEN missing');
 
 const bot = new Telegraf(BOT_TOKEN);
-const db = getDb();
-const mediaGroupCache = new Map();
-
-// --- INSTAGRAM GRAPH API HELPERS ---
-async function getTelegramFileUrl(fileId){
-  const res = await axios.get(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
-  return `https://api.telegram.org/file/bot${BOT_TOKEN}/${res.data.result.file_path}`;
-}
-async function createCarouselItem(imageUrl){
-  const url = `https://graph.facebook.com/v19.0/${IG_USER_ID}/media`;
-  const res = await axios.post(url, {image_url: imageUrl, is_carousel_item: true, access_token: IG_ACCESS_TOKEN});
-  return res.data.id;
-}
-async function createCarouselContainer(childrenIds, caption){
-  const url = `https://graph.facebook.com/v19.0/${IG_USER_ID}/media`;
-  const res = await axios.post(url, {media_type: 'CAROUSEL', children: childrenIds.join(','), caption, access_token: IG_ACCESS_TOKEN});
-  return res.data.id;
-}
-async function publishMedia(creationId){
-  const url = `https://graph.facebook.com/v19.0/${IG_USER_ID}/media_publish`;
-  const res = await axios.post(url, {creation_id: creationId, access_token: IG_ACCESS_TOKEN});
-  return res.data.id;
-}
-async function createReelContainer(videoUrl, caption){
-  const url = `https://graph.facebook.com/v19.0/${IG_USER_ID}/media`;
-  const res = await axios.post(url, {media_type: 'REELS', video_url: videoUrl, caption, access_token: IG_ACCESS_TOKEN});
-  return res.data.id;
-}
-
-// --- TELEGRAM BOT ---
-bot.start(async (ctx)=>{
-  await db.collection('telegram_uploads').doc(String(ctx.chat.id)).delete().catch(()=>{});
-  return ctx.reply('Boss swagat hai!\n\n👉 Carousel ke liye likho: image\n👉 Reels ke liye likho: video\n\nFir media bhejo!');
-});
-
-bot.on('text', async (ctx)=>{
-  const chatId = String(ctx.chat.id);
-  const text = ctx.message.text.trim().toLowerCase();
-  const originalText = ctx.message.text.trim();
-  if(text === 'image' || text === 'images' || text === 'carousel'){
-    await db.collection('telegram_uploads').doc(chatId).set({step: 'awaiting_images', type: 'carousel', chatId, createdAt: new Date()});
-    return ctx.reply('✅ Carousel mode ON!\n\nAb 2 se 10 images ek saath bhejo.');
-  }
-  if(text === 'video' || text === 'reel' || text === 'reels'){
-    await db.collection('telegram_uploads').doc(chatId).set({step: 'awaiting_video', type: 'reel', chatId, createdAt: new Date()});
-    return ctx.reply('✅ Reels mode ON!\n\nAb ek video bhejo.');
-  }
-  const doc = await db.collection('telegram_uploads').doc(chatId).get();
-  if(!doc.exists) return ctx.reply('Pehle likho: image ya video');
-  const data = doc.data();
-  if(data.step === 'awaiting_title'){
-    await db.collection('telegram_uploads').doc(chatId).update({title: originalText, step: 'awaiting_caption'});
-    return ctx.reply('👍 Title save!\n\nAb Caption bhejo:');
-  }
-  if(data.step === 'awaiting_caption'){
-    const fullCaption = `${data.title}\n\n${originalText}`;
-    await ctx.reply('⏳ Instagram pe post kar raha hu...');
-    try{
-      if(data.type === 'carousel'){
-        const childrenIds=[];
-        for(const imgUrl of data.images){
-          const id = await createCarouselItem(imgUrl);
-          childrenIds.push(id);
-          await new Promise(r=>setTimeout(r,1500));
-        }
-        const carouselId = await createCarouselContainer(childrenIds, fullCaption);
-        await new Promise(r=>setTimeout(r,3000));
-        const publishedId = await publishMedia(carouselId);
-        await db.collection('telegram_uploads').doc(chatId).delete();
-        return ctx.reply(`✅ Carousel Post Ho Gaya!\nID: ${publishedId}`);
-      } else {
-        const reelId = await createReelContainer(data.videoUrl, fullCaption);
-        for(let i=0;i<10;i++){
-          await new Promise(r=>setTimeout(r,5000));
-          try{
-            const check = await axios.get(`https://graph.facebook.com/v19.0/${reelId}?fields=status_code&access_token=${IG_ACCESS_TOKEN}`);
-            if(check.data.status_code === 'FINISHED') break;
-          }catch(e){}
-        }
-        const publishedId = await publishMedia(reelId);
-        await db.collection('telegram_uploads').doc(chatId).delete();
-        return ctx.reply(`✅ Reel Post Ho Gaya!\nID: ${publishedId}`);
-      }
-    }catch(err){
-      console.error(err.response?.data || err.message);
-      return ctx.reply(`❌ Error: ${err.response?.data?.error?.message || err.message}`);
-    }
-  }
-});
-
-bot.on('photo', async (ctx)=>{
-  const chatId = String(ctx.chat.id);
-  const msg = ctx.message;
-  const fileId = msg.photo[msg.photo.length-1].file_id;
-  const mediaGroupId = msg.media_group_id;
-  const fileUrl = await getTelegramFileUrl(fileId);
-  if(mediaGroupId){
-    if(!mediaGroupCache.has(mediaGroupId)) mediaGroupCache.set(mediaGroupId, {images:[], chatId, timer:null});
-    const group = mediaGroupCache.get(mediaGroupId);
-    group.images.push(fileUrl);
-    if(group.timer) clearTimeout(group.timer);
-    group.timer = setTimeout(async ()=>{
-      const finalImages = mediaGroupCache.get(mediaGroupId).images;
-      mediaGroupCache.delete(mediaGroupId);
-      await db.collection('telegram_uploads').doc(chatId).set({step: 'awaiting_title', images: finalImages.slice(0,10), type: 'carousel', chatId, createdAt: new Date()}, {merge:true});
-      ctx.reply(`🔥 ${finalImages.length} images mil gayi!\n\nAb Title bhejo:`);
-    }, 2500);
-  } else {
-    const docRef = db.collection('telegram_uploads').doc(chatId);
-    const existing = (await docRef.get()).data();
-    const imgs = existing?.images || [];
-    imgs.push(fileUrl);
-    await docRef.set({images: imgs, step: 'awaiting_title', type: 'carousel', chatId, createdAt: new Date()}, {merge:true});
-    ctx.reply(`✅ ${imgs.length} image save! Aur bhejo ya Title likho.`);
-  }
-});
-
-bot.on('video', async (ctx)=>{
-  const chatId = String(ctx.chat.id);
-  const fileId = ctx.message.video.file_id;
-  const fileUrl = await getTelegramFileUrl(fileId);
-  await db.collection('telegram_uploads').doc(chatId).set({step: 'awaiting_title', videoUrl: fileUrl, type: 'reel', chatId, createdAt: new Date()}, {merge:true});
-  ctx.reply('🎬 Video mil gayi! Ab Title bhejo:');
-});
-
-// --- EXPRESS SERVER FOR META VERIFICATION + BUSINESS LOGIN ---
 const app = express();
 app.use(express.json());
 
-app.get('/', (req,res)=>{
-  res.send('TubePilot Bot is Live - Telegram + Webhook + Business Login Ready');
+// Store user photos temporarily
+const userAlbums = new Map(); // userId -> {photos: [], timer: null}
+
+// --- Telegram Bot ---
+bot.start((ctx) => {
+  return ctx.reply(
+    `🚀 TubePilot Carousel Bot Ready!
+
+` +
+    `📸 Carousel kaise banaye:
+` +
+    `1. 2 se 10 photos ek saath ALBUM ke roop me bhejo
+` +
+    `2. Ya ek-ek karke jaldi bhejo (10 sec ke andar)
+` +
+    `3. Fir bot auto Instagram pe post kar dega @tubepilot.app pe
+
+` +
+    `Try karo - abhi 3 photos bhejo!`
+  );
 });
 
-// 1. WEBHOOK VERIFICATION - Meta ye check karega
-app.get('/webhook', (req,res)=>{
+bot.help((ctx) => {
+  ctx.reply('Bas 2-10 photos bhejo album ke roop me, mai Instagram pe carousel post kar dunga!');
+});
+
+bot.on('photo', async (ctx) => {
+  try {
+    const userId = ctx.from.id;
+    const photo = ctx.message.photo[ctx.message.photo.length - 1]; // highest quality
+    const fileId = photo.file_id;
+    
+    // Get file link
+    const fileLink = await ctx.telegram.getFileLink(fileId);
+    const fileUrl = fileLink.href;
+
+    console.log(`Photo received from ${userId}: ${fileUrl}`);
+
+    if (!userAlbums.has(userId)) {
+      userAlbums.set(userId, { photos: [], timer: null });
+    }
+    const album = userAlbums.get(userId);
+    album.photos.push(fileUrl);
+
+    // Clear old timer
+    if (album.timer) clearTimeout(album.timer);
+
+    // If this is part of a media_group (album), wait for all
+    const mediaGroupId = ctx.message.media_group_id;
+    
+    if (mediaGroupId) {
+      // Album - wait 3 seconds for all photos
+      album.timer = setTimeout(() => processAlbum(userId, ctx), 3000);
+      if (album.photos.length === 1) {
+        ctx.reply(`📸 ${album.photos.length} photo mili, aur bhejo... 3 sec me post karunga`);
+      }
+    } else {
+      // Single photo - wait 10 seconds to collect more
+      if (album.photos.length === 1) {
+        ctx.reply(`📸 Photo 1 mili! Agar carousel banana hai to 10 sec ke andar aur photos bhejo. Single post ke liye wait karo.`);
+      } else {
+        ctx.reply(`📸 Photo ${album.photos.length} mili!`);
+      }
+      album.timer = setTimeout(() => processAlbum(userId, ctx), 10000);
+    }
+
+  } catch (e) {
+    console.error('Photo handler error:', e);
+    ctx.reply('❌ Error: ' + e.message);
+  }
+});
+
+async function processAlbum(userId, ctx) {
+  const album = userAlbums.get(userId);
+  if (!album || album.photos.length === 0) return;
+
+  const photos = [...album.photos];
+  userAlbums.delete(userId); // clear
+
+  if (photos.length === 0) return;
+
+  try {
+    await ctx.reply(`🔄 ${photos.length} photos se ${photos.length > 1 ? 'Carousel' : 'Single Post'} bana raha hoon... Instagram pe @tubepilot.app`);
+
+    // Step 1: Create containers
+    const containerIds = [];
+    for (let i = 0; i < photos.length; i++) {
+      const url = photos[i];
+      console.log(`Creating container ${i+1}/${photos.length}: ${url}`);
+      
+      // Download and re-host? Instagram needs public URL, Telegram URLs expire fast
+      // So we create container directly with Telegram URL (works if posted quickly)
+      // Better to upload to somewhere, but try direct
+      const res = await axios.post(`https://graph.facebook.com/v20.0/${IG_USER_ID}/media`, null, {
+        params: {
+          image_url: url,
+          is_carousel_item: photos.length > 1 ? true : undefined,
+          access_token: IG_ACCESS_TOKEN
+        }
+      });
+      console.log(`Container ${i+1} created:`, res.data.id);
+      containerIds.push(res.data.id);
+      
+      // Small delay to avoid rate limit
+      await new Promise(r => setTimeout(r, 1500));
+    }
+
+    // Step 2: Create carousel or single
+    let creationId;
+    if (photos.length > 1) {
+      const res = await axios.post(`https://graph.facebook.com/v20.0/${IG_USER_ID}/media`, null, {
+        params: {
+          media_type: 'CAROUSEL',
+          children: containerIds.join(','),
+          caption: `Posted via TubePilot Bot 🚀 #tubepilot`,
+          access_token: IG_ACCESS_TOKEN
+        }
+      });
+      creationId = res.data.id;
+    } else {
+      creationId = containerIds[0];
+      // Add caption for single
+      await axios.post(`https://graph.facebook.com/v20.0/${creationId}`, null, {
+        params: {
+          caption: `Posted via TubePilot Bot 🚀 #tubepilot`,
+          access_token: IG_ACCESS_TOKEN
+        }
+      });
+    }
+
+    console.log('Creation ID:', creationId);
+    await ctx.reply(`⏳ Container ban gaya, ab publish kar raha hoon...`);
+
+    // Wait for containers to be ready
+    await new Promise(r => setTimeout(r, 5000));
+
+    // Step 3: Publish
+    const publishRes = await axios.post(`https://graph.facebook.com/v20.0/${IG_USER_ID}/media_publish`, null, {
+      params: {
+        creation_id: creationId,
+        access_token: IG_ACCESS_TOKEN
+      }
+    });
+
+    console.log('Published:', publishRes.data);
+    await ctx.reply(`✅ Posted Successfully! 🎉
+
+https://www.instagram.com/p/${publishRes.data.id}/
+
+Check karo @tubepilot.app pe!`);
+
+    // Save to Firebase
+    try {
+      const db = getDb();
+      await db.collection('telegram_uploads').add({
+        userId: userId,
+        username: ctx.from.username,
+        photos: photos,
+        igMediaId: publishRes.data.id,
+        createdAt: new Date()
+      });
+    } catch (fbErr) {
+      console.error('Firebase save error:', fbErr.message);
+    }
+
+  } catch (e) {
+    console.error('Publish error:', e.response?.data || e.message);
+    const errMsg = e.response?.data?.error?.message || e.message;
+    await ctx.reply(`❌ Post Fail: ${errMsg}
+
+Tip: Telegram photo link expire ho jata hai, jaldi post karta hoon. Fir se try karo.`);
+  }
+}
+
+// --- Express for Meta Webhook Verification ---
+app.get('/', (req, res) => {
+  res.send('TubePilot Bot is Running 🚀 - Ready at https://i-bw08.onrender.com');
+});
+
+app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-  console.log('Webhook verify attempt:', mode, token);
-  if(mode && token){
-    if(token === VERIFY_TOKEN){
-      console.log('WEBHOOK VERIFIED');
-      return res.status(200).send(challenge);
-    }
+  
+  console.log(`Webhook verify attempt: ${mode} ${token}`);
+  
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('WEBHOOK VERIFIED');
+    res.status(200).send(challenge);
+  } else {
+    console.log('Webhook verification failed');
+    res.sendStatus(403);
   }
-  return res.sendStatus(403);
 });
 
-// 2. WEBHOOK EVENTS - DM, comments etc.
-app.post('/webhook', (req,res)=>{
-  console.log('Webhook event:', JSON.stringify(req.body));
+app.post('/webhook', (req, res) => {
+  console.log('Webhook POST:', JSON.stringify(req.body).substring(0, 500));
   res.status(200).send('EVENT_RECEIVED');
 });
 
-// 3. INSTAGRAM BUSINESS LOGIN - OAuth Callback
-app.get('/auth/instagram/callback', async (req,res)=>{
-  const code = req.query.code;
-  if(!code) return res.status(400).send('No code received');
-  try{
-    // Exchange code for access token
-    // For Business Login: https://api.instagram.com/oauth/access_token
-    // For Facebook Login flow: graph.facebook.com/v19.0/oauth/access_token
-    const params = new URLSearchParams();
-    params.append('client_id', APP_ID);
-    params.append('client_secret', APP_SECRET);
-    params.append('grant_type', 'authorization_code');
-    params.append('redirect_uri', `https://${req.get('host')}/auth/instagram/callback`);
-    params.append('code', code);
+app.get('/auth/instagram/callback', (req, res) => res.send('Instagram Auth Callback OK - You can close this'));
+app.get('/auth/deauthorize', (req, res) => res.send('Deauthorize OK'));
+app.get('/auth/data-deletion', (req, res) => res.send('Data Deletion OK'));
 
-    const tokenRes = await axios.post('https://api.instagram.com/oauth/access_token', params);
-    const { access_token, user_id } = tokenRes.data;
-
-    // Save to Firebase for production use
-    await db.collection('instagram_tokens').doc(String(user_id)).set({
-      ig_user_id: user_id,
-      access_token,
-      createdAt: new Date()
-    });
-
-    console.log('New IG Business Login success:', user_id);
-    return res.send(`<h1>Instagram Connected!</h1><p>User ID: ${user_id}</p><p>Token saved. You can close this window.</p>`);
-  }catch(err){
-    console.error('OAuth error:', err.response?.data || err.message);
-    return res.status(500).send('OAuth Failed: ' + JSON.stringify(err.response?.data || err.message));
-  }
-});
-
-// 4. Deauthorize & Data Deletion (Required for App Review)
-app.get('/auth/deauthorize', (req,res)=> res.send('Deauthorize callback received'));
-app.get('/auth/data-deletion', (req,res)=> res.send('Data deletion callback received. Your data will be deleted.'));
-
+// --- Start ---
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, ()=>{
+app.listen(PORT, () => {
   console.log(`Express server running on port ${PORT} - Ready for Meta verification`);
 });
 
-bot.launch().then(()=> console.log('Telegram Bot started - Production Ready'));
+// Fix 409 Conflict - stop other instances
+bot.launch({ dropPendingUpdates: true }).then(() => {
+  console.log('Telegram Bot started - Production Ready');
+}).catch(err => {
+  console.error('Bot launch error:', err.message);
+  // Retry after 5 sec
+  setTimeout(() => bot.launch({ dropPendingUpdates: true }), 5000);
+});
+
+// Graceful stop
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
