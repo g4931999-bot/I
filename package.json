@@ -1,13 +1,14 @@
 {
-  "name": "promptbeta-insta-bot",
-  "version": "1.0.0",
-  "main": "carousel_telegram_bot.js",
+  "name": "tubepilot-production-bot",
+  "version": "2.0.0",
+  "main": "Carousel-Telegram-Bot.js",
   "scripts": {
-    "start": "node carousel_telegram_bot.js"
+    "start": "node Carousel-Telegram-Bot.js"
   },
   "dependencies": {
     "telegraf": "^4.16.3",
     "axios": "^1.7.2",
-    "firebase-admin": "^12.3.0"
+    "firebase-admin": "^12.3.0",
+    "express": "^4.19.2"
   }
 }
