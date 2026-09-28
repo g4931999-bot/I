@@ -1,0 +1,13 @@
+{
+  "name": "promptbeta-insta-bot",
+  "version": "1.0.0",
+  "main": "carousel_telegram_bot.js",
+  "scripts": {
+    "start": "node carousel_telegram_bot.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "axios": "^1.7.2",
+    "firebase-admin": "^12.3.0"
+  }
+}
